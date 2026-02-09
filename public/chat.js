@@ -1,67 +1,259 @@
 /**
- * LLM Chat App Frontend
- *
+ * LLM Chat App Frontend - TypeScript Version
  * Handles the chat UI interactions and communication with the backend API.
  */
 
-// DOM elements
-const chatMessages = document.getElementById("chat-messages");
-const userInput = document.getElementById("user-input");
-const sendButton = document.getElementById("send-button");
-const typingIndicator = document.getElementById("typing-indicator");
+// 1. تعريف الأنواع (Interfaces) لضمان سلامة البيانات
+interface ChatMessage {
+    role: 'user' | 'assistant' | 'system';
+    content: string;
+}
 
-// Chat state
-let chatHistory = [
-	{
-		role: "assistant",
-		content:
-			"Hello! I'm an LLM chat app powered by Cloudflare Workers AI. How can I help you today?",
-	},
+interface WorkerAIResponse {
+    response?: string;
+    choices?: Array<{
+        delta?: {
+            content?: string;
+        }
+    }>;
+}
+
+interface SSEResult {
+    events: string[];
+    buffer: string;
+}
+
+// 2. تعريف عناصر الـ DOM مع تحديد أنواعها بدقة
+// نستخدم 'as HTML...' لأننا متأكدون من وجود هذه العناصر في ملف HTML
+const chatMessages = document.getElementById("chat-messages") as HTMLDivElement;
+const userInput = document.getElementById("user-input") as HTMLTextAreaElement;
+const sendButton = document.getElementById("send-button") as HTMLButtonElement;
+const typingIndicator = document.getElementById("typing-indicator") as HTMLDivElement;
+
+// 3. حالة المحادثة (State)
+let chatHistory: ChatMessage[] = [
+    {
+        role: "assistant",
+        content: "Hello! I'm an AI assistant. How can I help you navigate the future today?",
+    },
 ];
-let isProcessing = false;
 
-// Auto-resize textarea as user types
-userInput.addEventListener("input", function () {
-	this.style.height = "auto";
-	this.style.height = this.scrollHeight + "px";
+let isProcessing: boolean = false;
+
+// 4. ضبط ارتفاع مربع النص تلقائياً عند الكتابة
+userInput.addEventListener("input", function (this: HTMLTextAreaElement) {
+    this.style.height = "auto";
+    this.style.height = this.scrollHeight + "px";
 });
 
-// Send message on Enter (without Shift)
-userInput.addEventListener("keydown", function (e) {
-	if (e.key === "Enter" && !e.shiftKey) {
-		e.preventDefault();
-		sendMessage();
-	}
+// 5. إرسال الرسالة عند ضغط Enter
+userInput.addEventListener("keydown", function (e: KeyboardEvent) {
+    if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+    }
 });
 
-// Send button click handler
-sendButton.addEventListener("click", sendMessage);
+// التعامل مع زر الإرسال
+sendButton.addEventListener("click", () => sendMessage());
 
 /**
- * Sends a message to the chat API and processes the response
+ * دالة الإرسال الرئيسية
  */
-async function sendMessage() {
-	const message = userInput.value.trim();
+async function sendMessage(): Promise<void> {
+    const message = userInput.value.trim();
 
-	// Don't send empty messages
-	if (message === "" || isProcessing) return;
+    // عدم الإرسال إذا كان الحقل فارغاً أو هناك عملية جارية
+    if (message === "" || isProcessing) return;
 
-	// Disable input while processing
-	isProcessing = true;
-	userInput.disabled = true;
-	sendButton.disabled = true;
+    // تعطيل المدخلات أثناء المعالجة
+    isProcessing = true;
+    userInput.disabled = true;
+    sendButton.disabled = true;
 
-	// Add user message to chat
-	addMessageToChat("user", message);
+    // إضافة رسالة المستخدم للشات
+    addMessageToChat("user", message);
 
-	// Clear input
-	userInput.value = "";
-	userInput.style.height = "auto";
+    // تنظيف الحقل
+    userInput.value = "";
+    userInput.style.height = "auto";
 
-	// Show typing indicator
-	typingIndicator.classList.add("visible");
+    // إظهار مؤشر الكتابة
+    typingIndicator.classList.add("visible");
 
-	// Add message to history
+    // تحديث السجل
+    chatHistory.push({ role: "user", content: message });
+
+    try {
+        // إنشاء عنصر لرسالة المساعد (فارغ في البداية)
+        const assistantMessageEl = document.createElement("div");
+        assistantMessageEl.className = "message assistant-message";
+        assistantMessageEl.innerHTML = "<p></p>";
+        chatMessages.appendChild(assistantMessageEl);
+        
+        // التقاط عنصر النص داخل الرسالة
+        const assistantTextEl = assistantMessageEl.querySelector("p") as HTMLParagraphElement;
+
+        // التمرير للأسفل
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+
+        // إرسال الطلب للـ API
+        const response = await fetch("/api/chat", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+                messages: chatHistory,
+            }),
+        });
+
+        // التعامل مع أخطاء الشبكة
+        if (!response.ok) {
+            throw new Error("Failed to get response");
+        }
+        if (!response.body) {
+            throw new Error("Response body is null");
+        }
+
+        // إعداد قارئ الـ Stream
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let responseText = "";
+        let buffer = "";
+
+        // دالة مساعدة لتحديث النص في الواجهة
+        const flushAssistantText = () => {
+            assistantTextEl.textContent = responseText;
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        };
+
+        let sawDone = false;
+
+        // حلقة قراءة الـ Stream
+        while (true) {
+            const { done, value } = await reader.read();
+
+            if (done) {
+                // معالجة ما تبقى في الـ Buffer
+                const parsed = consumeSseEvents(buffer + "\n\n");
+                processEvents(parsed.events);
+                break;
+            }
+
+            // فك تشفير البيانات القادمة
+            buffer += decoder.decode(value, { stream: true });
+            const parsed = consumeSseEvents(buffer);
+            buffer = parsed.buffer;
+            
+            if (processEvents(parsed.events)) {
+                sawDone = true;
+                break;
+            }
+        }
+
+        // إضافة الرد النهائي للسجل
+        if (responseText.length > 0) {
+            chatHistory.push({ role: "assistant", content: responseText });
+        }
+
+        /**
+         * دالة داخلية لمعالجة الأحداث المستخرجة
+         * تعيد true إذا تم الانتهاء
+         */
+        function processEvents(events: string[]): boolean {
+            for (const data of events) {
+                if (data === "[DONE]") {
+                    return true;
+                }
+                try {
+                    const jsonData: WorkerAIResponse = JSON.parse(data);
+                    
+                    // دعم الصيغتين: Workers AI و OpenAI Compatible
+                    let content = "";
+                    if (jsonData.response && jsonData.response.length > 0) {
+                        content = jsonData.response;
+                    } else if (jsonData.choices?.[0]?.delta?.content) {
+                        content = jsonData.choices[0].delta.content;
+                    }
+
+                    if (content) {
+                        responseText += content;
+                        flushAssistantText();
+                    }
+                } catch (e) {
+                    console.error("Error parsing SSE data as JSON:", e, data);
+                }
+            }
+            return false;
+        }
+
+    } catch (error) {
+        console.error("Error:", error);
+        addMessageToChat(
+            "assistant",
+            "Sorry, there was an error processing your request."
+        );
+    } finally {
+        // إعادة تفعيل الواجهة
+        typingIndicator.classList.remove("visible");
+        isProcessing = false;
+        userInput.disabled = false;
+        sendButton.disabled = false;
+        userInput.focus();
+    }
+}
+
+/**
+ * دالة مساعدة لإضافة رسالة للواجهة
+ */
+function addMessageToChat(role: 'user' | 'assistant', content: string): void {
+    const messageEl = document.createElement("div");
+    messageEl.className = `message ${role}-message`;
+    // ملاحظة: في بيئة الإنتاج يفضل استخدام textContent للحماية من XSS
+    // ولكن هنا نستخدم innerHTML للسماح بتنسيق بسيط إذا لزم الأمر
+    messageEl.innerHTML = `<p>${escapeHtml(content)}</p>`;
+    chatMessages.appendChild(messageEl);
+
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+/**
+ * معالجة Server-Sent Events (SSE)
+ */
+function consumeSseEvents(buffer: string): SSEResult {
+    let normalized = buffer.replace(/\r/g, "");
+    const events: string[] = [];
+    let eventEndIndex: number;
+
+    while ((eventEndIndex = normalized.indexOf("\n\n")) !== -1) {
+        const rawEvent = normalized.slice(0, eventEndIndex);
+        normalized = normalized.slice(eventEndIndex + 2);
+
+        const lines = rawEvent.split("\n");
+        const dataLines: string[] = [];
+        
+        for (const line of lines) {
+            if (line.startsWith("data:")) {
+                dataLines.push(line.slice("data:".length).trimStart());
+            }
+        }
+        
+        if (dataLines.length === 0) continue;
+        events.push(dataLines.join("\n"));
+    }
+    return { events, buffer: normalized };
+}
+
+// دالة حماية بسيطة (اختياري)
+function escapeHtml(text: string): string {
+    return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
 	chatHistory.push({ role: "user", content: message });
 
 	try {
