@@ -1,26 +1,18 @@
 /**
- * LLM Chat Application Template
- *
- * A simple chat application using Cloudflare Workers AI.
- * This template demonstrates how to implement an LLM-powered chat interface with
- * streaming responses using Server-Sent Events (SSE).
- *
- * @license MIT
+ * Astra AI - Backend Worker
+ * نظام متكامل يدعم البث المباشر (Streaming) واختيار النماذج.
  */
 import { Env, ChatMessage } from "./types";
 
-// Model ID for Workers AI model
-// https://developers.cloudflare.com/workers-ai/models/
-const MODEL_ID = "@cf/meta/llama-3.1-8b-instruct-fp8";
+// تعريف النماذج المتاحة وربطها بموديلات Cloudflare
+const MODELS = {
+	"astra-2.5": "@cf/meta/llama-3.1-8b-instruct-fp8", // نموذج سريع وخفيف
+	"astra-3.0-pro": "@cf/meta/llama-3.1-70b-instruct-awq" // نموذج قوي واحترافي
+};
 
-// Default system prompt
-const SYSTEM_PROMPT =
-	"You are a helpful, friendly assistant. Provide concise and accurate responses.";
+const SYSTEM_PROMPT = "Your name is Astra AI. You are a professional and helpful assistant.";
 
 export default {
-	/**
-	 * Main request handler for the Worker
-	 */
 	async fetch(
 		request: Request,
 		env: Env,
@@ -28,37 +20,67 @@ export default {
 	): Promise<Response> {
 		const url = new URL(request.url);
 
-		// Handle static assets (frontend)
-		if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
+		// 1. التعامل مع الملفات الثابتة (Frontend & Assets)
+		// هذا الجزء يضمن عدم تداخل الكود مع الواجهة
+		if (!url.pathname.startsWith("/api/")) {
 			return env.ASSETS.fetch(request);
 		}
 
-		// API Routes
+		// 2. مسارات الـ API
 		if (url.pathname === "/api/chat") {
-			// Handle POST requests for chat
-			if (request.method === "POST") {
-				return handleChatRequest(request, env);
+			if (request.method !== "POST") {
+				return new Response("Method not allowed", { status: 405 });
 			}
-
-			// Method not allowed for other request types
-			return new Response("Method not allowed", { status: 405 });
+			return handleChatRequest(request, env);
 		}
 
-		// Handle 404 for unmatched routes
 		return new Response("Not found", { status: 404 });
 	},
 } satisfies ExportedHandler<Env>;
 
 /**
- * Handles chat API requests
+ * معالجة طلبات الدردشة ودعم النماذج المتعددة
  */
 async function handleChatRequest(
 	request: Request,
 	env: Env,
 ): Promise<Response> {
 	try {
-		// Parse JSON request body
-		const { messages = [] } = (await request.json()) as {
+		// استقبال البيانات من الواجهة (بما في ذلك الموديل المختار)
+		const { messages = [], model = "astra-2.5" } = (await request.json()) as {
 			messages: ChatMessage[];
+			model: string;
 		};
 
+		// تحديد الموديل المطلوب بناءً على القيمة القادمة من الواجهة
+		const selectedModelId = MODELS[model as keyof typeof MODELS] || MODELS["astra-2.5"];
+
+		// إعداد سجل الرسائل مع إضافة System Prompt إذا لم يوجد
+		const chatMessages: ChatMessage[] = [...messages];
+		if (!chatMessages.some(m => m.role === 'system')) {
+			chatMessages.unshift({ role: "system", content: SYSTEM_PROMPT });
+		}
+
+		// استدعاء Workers AI مع تفعيل خاصية الـ Stream
+		const response = await env.AI.run(selectedModelId, {
+			messages: chatMessages,
+			stream: true,
+		});
+
+		// إعادة الرد كـ Server-Sent Events (SSE)
+		return new Response(response as ReadableStream, {
+			headers: {
+				"Content-Type": "text/event-stream",
+				"Cache-Control": "no-cache",
+				"Connection": "keep-alive",
+			},
+		});
+
+	} catch (error: any) {
+		console.error("Astra AI Backend Error:", error);
+		return new Response(
+			JSON.stringify({ error: "Internal Server Error", details: error.message }),
+			{ status: 500, headers: { "Content-Type": "application/json" } }
+		);
+	}
+}
